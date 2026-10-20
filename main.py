@@ -16,7 +16,7 @@ SMSBOWER_KEY = os.getenv("SMSBOWER_KEY")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Pyrogram Client
+# Pyrogram Client for checking Telegram status
 tele_client = Client("checker_session", api_id=API_ID, api_hash=API_HASH)
 
 COUNTRY_MAP = {
@@ -38,24 +38,24 @@ async def get_sms_balance():
                 return text.split(":")[1]
             return "0.00"
 
-# 2. Fetch ALL Real Live Rates and Stock List
-async def get_all_live_prices(country_code, service="tg"):
+# 2. Fetch Multi-Prices & Stock List from SMSBower
+async def get_smsbower_prices(country_code, service="tg"):
     url = f"https://smsbower.com/stubs/handler_api.php?api_key={SMSBOWER_KEY}&action=getPrices&service={service}&country={country_code}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             try:
                 data = await resp.json()
-                if str(country_code) in data and service in data[str(country_code)]:
-                    return data[str(country_code)][service]
-                return {}
+                c_data = data.get(str(country_code), {})
+                service_data = c_data.get(service, {})
+                return service_data # Returns dictionary like {"0.119": 1500, "0.19": 200}
             except Exception:
                 return {}
 
-# 3. Buy Number with Dynamic Max/Min Price Handling
-async def buy_smsbower_number(country_code, max_price=None, service="tg"):
+# 3. Buy Number with Exact Selected Price/Rate
+async def buy_number_with_rate(country_code, price=None, service="tg"):
     url = f"https://smsbower.com/stubs/handler_api.php?api_key={SMSBOWER_KEY}&action=getNumber&service={service}&country={country_code}"
-    if max_price:
-        url += f"&maxPrice={max_price}"
+    if price and price != "auto":
+        url += f"&price={price}"
         
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
@@ -65,7 +65,7 @@ async def buy_smsbower_number(country_code, max_price=None, service="tg"):
                 return parts[1], parts[2]  # activation_id, phone_number
             return None, text
 
-# 4. Telegram Status Checker (Non-blocking)
+# 4. Telegram Status Checker
 async def check_telegram_status(phone_number):
     try:
         if not tele_client.is_connected:
@@ -79,7 +79,7 @@ async def check_telegram_status(phone_number):
     except Exception:
         return "🔴 Blocked"
 
-# Persistent Menu
+# Persistent Main Menu Keyboard
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="▶️ Start Bulk"), KeyboardButton(text="⏹ Stop Bulk")],
@@ -115,60 +115,60 @@ async def country_menu(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer("🌍 **Select Country:**", reply_markup=kb, parse_mode="Markdown")
 
+# Show Panel-like Live Rates & Stock
 @dp.callback_query(F.data.startswith("select_"))
-async def view_live_rates(callback: types.CallbackQuery):
+async def view_panel_rates(callback: types.CallbackQuery):
     c_key = callback.data.split("_")[1]
     c_info = COUNTRY_MAP.get(c_key)
     c_code = c_info["code"]
     
-    await callback.message.edit_text(f"⏳ Fetching all LIVE rates for {c_info['name']}...")
+    await callback.message.edit_text(f"⏳ Loading live rates for {c_info['name']}...")
     
-    rates = await get_all_live_prices(c_code, service="tg")
+    prices = await get_smsbower_prices(c_code, service="tg")
     
     kb_list = []
-    if rates:
-        # Sort rates and generate buttons for all available prices & stock
-        for price_val, stock_count in sorted(rates.items(), key=lambda x: float(x[0])):
+    if prices:
+        # Sort prices like panel (Low to High or High to Low)
+        for price, stock in sorted(prices.items(), key=lambda x: float(x[0])):
             kb_list.append([InlineKeyboardButton(
-                text=f"✅ ${price_val} ({stock_count} Stock)", 
-                callback_data=f"buy_{c_code}_{price_val}_{c_key}"
+                text=f"💵 ${price}  |  📦 Stock: {stock} pcs", 
+                callback_data=f"buy_{c_code}_{price}_{c_key}"
             )])
     else:
-        # Default Auto-best rate button if prices empty
         kb_list.append([InlineKeyboardButton(text="⚡ Buy Best Available Rate", callback_data=f"buy_{c_code}_auto_{c_key}")])
         
-    kb_list.append([InlineKeyboardButton(text="🌍 Change Country", callback_data="back_country_list")])
+    kb_list.append([InlineKeyboardButton(text="🌍 Change Country", callback_data="back_to_countries")])
     
     kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
     await callback.message.edit_text(
-        f"📊 **Live Rates & Stock for {c_info['name']}**\n\nNiche rate click kore number nin:",
+        f"📊 **Live Rates & Stock for {c_info['name']}**\n\nApnar panel-er moto live rate gulo niche dewa holo:",
         reply_markup=kb,
         parse_mode="Markdown"
     )
 
-@dp.callback_query(F.data == "back_country_list")
-async def back_country(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "back_to_countries")
+async def back_countries(callback: types.CallbackQuery):
     await callback.message.delete()
     await country_menu(callback.message)
 
+# Buy Number Process with Selected Rate
 @dp.callback_query(F.data.startswith("buy_"))
-async def process_buy_number(callback: types.CallbackQuery):
+async def process_buy(callback: types.CallbackQuery):
     parts = callback.data.split("_")
     c_code = parts[1]
-    cost = parts[2]
+    price = parts[2]
     c_key = parts[3]
     
-    await callback.message.edit_text("⏳ Requesting number from SMSBower...")
+    await callback.message.edit_text("⏳ Requesting number from SMSBower panel...")
     
-    max_p = None if cost == "auto" else cost
-    act_id, phone_res = await buy_smsbower_number(c_code, max_price=max_p, service="tg")
+    act_id, phone_res = await buy_number_with_rate(c_code, price=price, service="tg")
     
     if not act_id:
-        # Fallback without price filter if specific rate fails
-        act_id, phone_res = await buy_smsbower_number(c_code, max_price=None, service="tg")
+        # Fallback to auto if specific price gives NO_NUMBERS
+        act_id, phone_res = await buy_number_with_rate(c_code, price="auto", service="tg")
         
     if not act_id:
-        await callback.message.edit_text(f"❌ Failed to get number: `{phone_res}`", parse_mode="Markdown")
+        await callback.message.edit_text(f"❌ Failed: `{phone_res}`\n(Stock sesh ba rate-e number nei)", parse_mode="Markdown")
         return
         
     await callback.message.edit_text("🔍 Checking Status on Telegram...")
@@ -179,7 +179,7 @@ async def process_buy_number(callback: types.CallbackQuery):
         f"Power By SMSBower\n\n"
         f"🌍 Country: {COUNTRY_MAP[c_key]['name']}\n"
         f"📱 Number: `+{phone_res}`\n"
-        f"💵 Cost: ${cost if cost != 'auto' else '0.119'}\n"
+        f"💵 Cost: ${price if price != 'auto' else '0.119'}\n"
         f"🔍 Number Status: {status}\n"
         f"🆔 Activation: `{act_id}`"
     )
@@ -210,7 +210,7 @@ async def stop_bulk(message: types.Message):
 
 @dp.message(F.text == "💱 Change Rate")
 async def change_rate(message: types.Message):
-    await message.answer("💱 Live Best Rate Selector Active.")
+    await message.answer("💱 Panel Live Rate Mode Active.")
 
 @dp.message(F.text == "🚫 Cancel (No OTP)")
 @dp.message(F.text == "🔄 Reset Bot")
@@ -218,7 +218,7 @@ async def reset_bot(message: types.Message):
     await message.answer("🔄 Bot cache reset done.", reply_markup=main_menu)
 
 async def main():
-    print("Bot is running...")
+    print("Bot running with panel live multi-rates...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
